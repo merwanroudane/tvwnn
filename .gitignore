@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# cached FRED-MD downloads
+data/*.csv
+
+# generated output
+figures/
+tables/
+
+# reference PDFs -- not redistributable
+papers/
+
+# copyrighted reference material and internal working notes -- never published
+*.pdf
+*.zip
+_PAPER_DEEP_READ.md
+_SOURCES_NEEDED.md
