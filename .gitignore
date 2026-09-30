@@ -24,3 +24,6 @@ papers/
 *.zip
 _PAPER_DEEP_READ.md
 _SOURCES_NEEDED.md
+
+# local dev server config
+.claude/

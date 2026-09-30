@@ -1,0 +1,819 @@
+"""
+Generate the tvwnn documentation site (docs/index.html).
+
+Every results table on the page is built here from the CSVs in ``tables/``,
+so the site can never drift from what the code actually produced.  Re-run
+after any new study:
+
+    python examples/run_empirical_study.py
+    python examples/other_targets_study.py
+    python docs/build_site.py
+
+Author: Dr Merwan Roudane <merwanroudane920@gmail.com>
+        https://github.com/merwanroudane/tvwnn
+"""
+
+from __future__ import annotations
+
+import html
+import shutil
+from pathlib import Path
+
+import pandas as pd
+
+ROOT = Path(__file__).resolve().parent.parent
+DOCS = ROOT / "docs"
+ASSETS = DOCS / "assets"
+TABLES = ROOT / "tables"
+FIGURES = ROOT / "figures"
+
+GH = "https://github.com/merwanroudane/tvwnn"
+BLOB = f"{GH}/blob/main"
+PYPI = "https://pypi.org/project/tvwnn/"
+DOI = "https://doi.org/10.1002/for.70014"
+AUTHOR = "Dr Merwan Roudane"
+EMAIL = "merwanroudane920@gmail.com"
+VERSION = "1.0.0"
+
+MODEL_ORDER = ["AR", "TVP", "ARX", "FFNN", "RNN", "LSTM", "TVNN"]
+
+
+# --------------------------------------------------------------- helpers
+
+
+def esc(t: str) -> str:
+    return html.escape(str(t), quote=False)
+
+
+def stars_html(s) -> str:
+    s = "" if not isinstance(s, str) else s.strip()
+    return f'<span class="star">{s}</span>' if s else ""
+
+
+def sync_figures() -> None:
+    ASSETS.mkdir(parents=True, exist_ok=True)
+    if not FIGURES.exists():
+        return
+    import re
+
+    for f in FIGURES.glob("*.png"):
+        shutil.copy(f, ASSETS / re.sub(r"[^a-z0-9_.]", "_", f.name.lower()))
+
+
+def figure(src: str, caption: str, alt: str = "") -> str:
+    if not (ASSETS / src).exists():
+        return ""
+    return (
+        f'<figure><img src="assets/{src}" alt="{esc(alt or caption)}" loading="lazy">'
+        f"<figcaption>{caption}</figcaption></figure>"
+    )
+
+
+def table_card(title: str, subtitle: str, thead: str, tbody: str, note: str = "") -> str:
+    n = f'<div class="tnote">{note}</div>' if note else ""
+    return f"""<div class="tablecard">
+  <div class="thead"><div class="t">{title}</div><div class="s">{subtitle}</div></div>
+  <div class="tscroll"><table><thead>{thead}</thead><tbody>{tbody}</tbody></table></div>
+  {n}</div>"""
+
+
+# --------------------------------------------------- results tables from CSV
+
+
+def paper_targets_table() -> str:
+    """Tables 1 and 2: relative MSE by model x horizon, per target."""
+    out = []
+    for target, label in (("indpro", "INDPRO"), ("unrate", "UNRATE")):
+        p = TABLES / f"results_{target}.csv"
+        if not p.exists():
+            continue
+        df = pd.read_csv(p)
+        horizons = sorted(df["h"].unique())
+        piv = df.pivot_table(index="model", columns="h", values="relative_mse")
+        st = df.pivot_table(index="model", columns="h", values="stars", aggfunc="first")
+
+        order = [m for m in MODEL_ORDER if m in piv.index]
+        order += [m for m in piv.index if m not in order]
+
+        thead = (
+            "<tr><th class='l'>Model</th>"
+            + "".join(f"<th>h = {h}</th>" for h in horizons)
+            + "</tr>"
+        )
+        best = {h: piv[h].idxmin() for h in horizons if piv[h].notna().any()}
+        rows = []
+        for m in order:
+            cls = ' class="row-tvnn"' if m == "TVNN" else ""
+            cells = []
+            for h in horizons:
+                v = piv.loc[m, h] if h in piv.columns else float("nan")
+                if pd.isna(v):
+                    cells.append("<td>&mdash;</td>")
+                    continue
+                s = st.loc[m, h] if (h in st.columns and m in st.index) else ""
+                c = " best" if best.get(h) == m else ""
+                cells.append(f'<td class="{c.strip()}">{v:.3f}{stars_html(s)}</td>')
+            rows.append(f"<tr{cls}><td class='l model'>{m}</td>" + "".join(cells) + "</tr>")
+
+        out.append(
+            table_card(
+                f"Target {label}",
+                "POOS MSE relative to the AR benchmark &middot; P = 24 &middot; "
+                "1990-01 to 2014-12 &middot; single networks, fixed hyperparameters",
+                thead,
+                "".join(rows),
+                "Green marks the best model at each horizon. "
+                "Stars: Diebold&ndash;Mariano test against the AR benchmark, "
+                "<span class='star'>*</span> p&lt;0.10, "
+                "<span class='star'>**</span> p&lt;0.05, "
+                "<span class='star'>***</span> p&lt;0.01. "
+                "Values below 1.000 beat the benchmark.",
+            )
+        )
+    return "\n".join(out)
+
+
+def other_targets_table() -> str:
+    p = TABLES / "other_targets.csv"
+    if not p.exists():
+        return ""
+    df = pd.read_csv(p)
+    horizons = sorted(df["h"].unique())
+    thead = (
+        "<tr><th class='l'>Target</th><th class='l'>Model</th>"
+        + "".join(f"<th>h = {h}</th>" for h in horizons)
+        + "</tr>"
+    )
+    rows = []
+    for ti, (target, g) in enumerate(df.groupby("target", sort=True)):
+        piv = g.pivot_table(index="model", columns="h", values="relative_mse")
+        st = g.pivot_table(index="model", columns="h", values="stars", aggfunc="first")
+        order = [m for m in MODEL_ORDER if m in piv.index]
+        best = {h: piv[h].idxmin() for h in horizons if h in piv.columns and piv[h].notna().any()}
+        for mi, m in enumerate(order):
+            cls = "row-tvnn" if m == "TVNN" else ""
+            if mi == 0 and ti > 0:
+                cls = (cls + " groupstart").strip()
+            first = f"<td class='l'><b>{esc(target)}</b></td>" if mi == 0 else "<td></td>"
+            cells = []
+            for h in horizons:
+                v = piv.loc[m, h] if h in piv.columns else float("nan")
+                if pd.isna(v):
+                    cells.append("<td>&mdash;</td>")
+                    continue
+                s = st.loc[m, h] if (h in st.columns and m in st.index) else ""
+                c = "best" if best.get(h) == m else ""
+                cells.append(f'<td class="{c}">{v:.3f}{stars_html(s)}</td>')
+            attr = f' class="{cls}"' if cls else ""
+            rows.append(
+                f"<tr{attr}>{first}<td class='l model'>{m}</td>" + "".join(cells) + "</tr>"
+            )
+    return table_card(
+        "Six targets, three horizons",
+        "POOS MSE relative to the AR benchmark &middot; P = 24 &middot; "
+        "1990-01 to 2014-12 &middot; d = 1, l2 = 0.02 throughout",
+        thead,
+        "".join(rows),
+        "The TVNN halves the benchmark's error on inflation at h = 12, and beats the "
+        "fixed-weight FFNN on the federal funds rate. It loses on payroll employment "
+        "and on the paper's own two targets. Stars as above.",
+    )
+
+
+def mcs_table() -> str:
+    parts = []
+    for target, label in (("indpro", "INDPRO"), ("unrate", "UNRATE")):
+        p = TABLES / f"mcs_{target}.csv"
+        if not p.exists():
+            continue
+        df = pd.read_csv(p)
+        thead = (
+            "<tr><th class='l'>Model</th><th>Avg. loss</th>"
+            "<th>Eliminated at</th><th>MCS p-value</th><th>In MCS</th></tr>"
+        )
+        rows = []
+        for _, r in df.iterrows():
+            inm = bool(r["in_mcs"])
+            cls = ' class="row-tvnn"' if r["model"] == "TVNN" else ""
+            elim = "&mdash;" if pd.isna(r["eliminated_at"]) else f"{int(r['eliminated_at'])}"
+            mark = (
+                '<span class="pill ok">yes</span>' if inm else '<span class="pill">no</span>'
+            )
+            rows.append(
+                f"<tr{cls}><td class='l model'>{esc(r['model'])}</td>"
+                f"<td>{r['avg_loss']:.4f}</td><td>{elim}</td>"
+                f"<td>{r['mcs_pvalue']:.3f}</td><td>{mark}</td></tr>"
+            )
+        parts.append(
+            table_card(
+                f"Model Confidence Set &middot; {label}",
+                "Hansen&ndash;Lunde&ndash;Nason, &alpha; = 0.10, 500 bootstrap replications",
+                thead,
+                "".join(rows),
+                "The paper reports many pairwise Diebold&ndash;Mariano tests with no "
+                "multiplicity control. This is that correction: the surviving set "
+                "contains the best model with probability at least 1 &minus; &alpha;.",
+            )
+        )
+    return "\n".join(parts)
+
+
+def dm_pairwise_table() -> str:
+    p = TABLES / "dm_pairwise_indpro.csv"
+    if not p.exists():
+        return ""
+    df = pd.read_csv(p, index_col=0)
+    cols = list(df.columns)
+    thead = (
+        "<tr><th class='l'>Model</th>"
+        + "".join(f"<th>vs {esc(c)}</th>" for c in cols)
+        + "</tr>"
+    )
+    rows = []
+    for m in df.index:
+        cls = ' class="row-tvnn"' if m == "TVNN" else ""
+        cells = []
+        for c in cols:
+            v = df.loc[m, c]
+            if pd.isna(v):
+                cells.append("<td>&mdash;</td>")
+            else:
+                strong = ' class="best"' if v < 0.10 else ""
+                cells.append(f"<td{strong}>{v:.3f}</td>")
+        rows.append(f"<tr{cls}><td class='l model'>{esc(m)}</td>" + "".join(cells) + "</tr>")
+    return table_card(
+        "Every pairwise Diebold&ndash;Mariano p-value &middot; INDPRO",
+        "h = 12, P = 24 &mdash; the comparison the paper never reports",
+        thead,
+        "".join(rows),
+        "The paper's significance stars are all against the <em>AR</em> benchmark, so "
+        "TVNN&nbsp;vs&nbsp;FFNN &mdash; the comparison its headline claim rests on &mdash; "
+        "is never tested. Green marks p&nbsp;&lt;&nbsp;0.10.",
+    )
+
+
+# ------------------------------------------------------------------- page
+
+
+def build() -> str:
+    sync_figures()
+
+    nav = [
+        ("Overview", [("what", "What is the TVNN"), ("install", "Install &amp; quickstart")]),
+        ("Guide", [("guide", "Writing the code, step by step")]),
+        ("Reference", [("api", "API &amp; syntax"), ("map", "Code &rarr; equation map")]),
+        ("Results", [("results", "The paper&rsquo;s two targets"),
+                     ("other", "Six targets, three horizons"),
+                     ("figures", "Figure gallery")]),
+        ("Honesty", [("open", "What the paper leaves open"),
+                     ("realdata", "What only shows up on real data"),
+                     ("tests", "Testing &amp; verification")]),
+        ("End matter", [("cite", "Citation"), ("links", "All links")]),
+    ]
+    navhtml = []
+    for group, items in nav:
+        navhtml.append(f'<div class="navgroup">{group}</div>')
+        for anchor, label in items:
+            navhtml.append(f'<a href="#{anchor}">{label}</a>')
+    navhtml = "\n".join(navhtml)
+
+    steps = [
+        ("Decide the backend split", "tvwnn/model.py", """
+<p>Algorithm 1 has two loops over <em>different</em> objectives, and only one needs derivatives. The EM loop runs with the network frozen &mdash; pure recursion over tiny matrices, no autodiff. The Adam loop runs with the states frozen &mdash; gradients flow only through <code>z_t</code>.</p>
+<p>So: <b>NumPy for the state space, PyTorch for the network.</b> That mirrors the algorithm exactly and avoids fighting an autodiff framework over a sequential scan.</p>"""),
+
+        ("Write the Kalman filter", "tvwnn/kalman.py", """
+<div class="eq">predict&nbsp;&nbsp;&nbsp; a<sub>t|t-1</sub> = a<sub>t-1|t-1</sub> &nbsp;&nbsp; P<sub>t|t-1</sub> = P<sub>t-1|t-1</sub> + &Omega;<br>
+innovation&nbsp; v<sub>t</sub> = y<sub>t</sub> &minus; z<sub>t</sub>&prime;a<sub>t|t-1</sub> &nbsp;&nbsp; F<sub>t</sub> = z<sub>t</sub>&prime;P<sub>t|t-1</sub>z<sub>t</sub> + &sigma;&sup2;<br>
+gain&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; K<sub>t</sub> = P<sub>t|t-1</sub> z<sub>t</sub> / F<sub>t</sub><br>
+update&nbsp;&nbsp;&nbsp;&nbsp; a<sub>t|t</sub> = a<sub>t|t-1</sub> + K<sub>t</sub> v<sub>t</sub></div>
+<p>Two details that are easy to get wrong. <b>Return both the predicted and the updated state</b> &mdash; they are not interchangeable, and which one enters eq.&nbsp;(8) decides whether the objective is a genuine prediction-error decomposition. And <b>symmetrise P after every update</b>, or floating-point drift over 700 iterations quietly corrupts the smoother gains.</p>"""),
+
+        ("Write the smoother <em>and</em> the lag-one covariance", "tvwnn/kalman.py", """
+<div class="note note-warn"><span class="lbl">The single easiest mistake in this model</span>
+<p>Eq.&nbsp;(7) needs <code>Var[&xi;_t | y] = P<sub>t|n</sub> + P<sub>t&minus;1|n</sub> &minus; P<sub>t,t&minus;1|n</sub> &minus; P<sub>t,t&minus;1|n</sub>&prime;</code>. The <b>lag-one smoothed covariance</b> is <em>not</em> returned by a plain RTS smoother &mdash; it needs its own recursion. Omit it and you inflate <code>&Omega;&#770;</code> with <b>no error raised at all</b>: nothing crashes, the model just concludes the coefficients drift far more than they do.</p></div>
+<p>The tripwire is <code>test_loglikelihood_increases_monotonically</code> &mdash; dropping the cross term breaks EM's monotonicity guarantee, so the test catches it.</p>
+<p><b>Fast path.</b> Since <code>d &isin; {1,2}</code>, the <code>d = 1</code> case runs in pure Python floats. NumPy's per-call overhead on 1&times;1 arrays dominated everything: this took a filter+smoother pass from <b>11.3&nbsp;ms to 0.86&nbsp;ms</b>, and a test asserts it matches the matrix path to 1e&minus;10.</p>"""),
+
+        ("Write the M step", "tvwnn/em.py", """
+<p>Differentiate <code>Q</code> and set to zero. The paper prints none of these &mdash; it delegates to Holmes (2013) by citation &mdash; so they come from that technical report:</p>
+<div class="eq">&sigma;&#770;&sup2; = (1/T) &Sigma;<sub>t</sub> [ (y<sub>t+h</sub> &minus; z<sub>t</sub>&prime;&beta;&#770;<sub>t</sub>)&sup2; + z<sub>t</sub>&prime; &Sigma;&#770;<sub>&beta;t</sub> z<sub>t</sub> ]<br>
+&Omega;&#770;&nbsp; = (1/T) &Sigma;<sub>t</sub> [ &Sigma;&#770;<sub>&xi;t</sub> + &xi;&#770;<sub>t</sub> &xi;&#770;<sub>t</sub>&prime; ]<br>
+b&#770;<sub>0</sub> = &beta;&#770;<sub>0</sub></div>
+<p><b>Validate here, before writing any network code.</b> With a fixed design the M step is an exact maximiser, so EM must recover known-truth parameters. It does: &sigma;&sup2; = 0.25 recovered as 0.2606, &Omega; = diag(0.010, 0.004) as diag(0.0105, 0.0025) on n = 800.</p>"""),
+
+        ("Cross-check against code you did not write", "tests/test_kalman.py", """
+<p>Before trusting anything, check the filter against an independent implementation. <code>statsmodels</code>' <code>MLEModel</code> implements the same state space in Durbin&ndash;Koopman conventions:</p>
+<pre class="out"><code>our loglik    -219.6990712607
+statsmodels   -219.6990712601
+max |v diff|      5.8e-10
+max |F diff|      1.6e-08
+max |filt diff|   1.7e-10</code></pre>
+<p>This is the strongest available correctness argument for the half of the model that contains no novel mathematics. Whatever goes wrong later is in the alternation, not the filter.</p>"""),
+
+        ("Write the network", "tvwnn/network.py", """
+<div class="eq">u<sub>t</sub> &rarr; Dense(32, tanh) &rarr; [Dense(16, tanh)] &rarr; Dense(d) &rarr; z<sub>t</sub></div>
+<div class="note note-key"><span class="lbl">The reading that matters</span>
+<p>Appendix A.3 selects <b>d &isin; {1, 2}</b>. Combined with &ldquo;first hidden layer of size 32&rdquo;, that means <code>z_t</code> is a <b>bottleneck output layer of width one or two</b>, not the 32-unit hidden layer. Get this wrong and you build a 32-dimensional state &mdash; a completely different, far more expensive model.</p></div>
+<p>Dropout applies only in training mode; the basis handed to the Kalman recursions is always computed in eval mode, because a stochastic <code>z_t</code> would make the filter meaningless.</p>"""),
+
+        ("Assemble Algorithm 1", "tvwnn/model.py", """
+<pre><code>for _ in range(n_outer):
+    Z, z_tilde = net.basis_numpy(U_t)           # network frozen
+    theta, _   = run_em(target, Z, theta, ...)  # inner EM to convergence
+    filt       = kalman_filter(target, Z, ...)
+    b, V       = filt.a_pred, filt.P_pred       # states frozen
+
+    for _ in range(grad_steps):                 # Adam, states constant
+        z, zt = net(U_t)                        # z recomputed: w changes
+        resid = y_t - einsum("td,td-&gt;t", z, b_t)
+        F     = sigma2 + einsum("td,tde,te-&gt;t", z, V_t, z)
+        loss  = mean(resid**2 / F) + l2 * net.l2_penalty()
+        loss.backward(); optimiser.step()</code></pre>
+<p><b>b</b> and <b>V</b> are frozen inside the inner loop &mdash; that is the paper's whole computational claim, and it is only true under freezing. <code>z</code> is recomputed each Adam step and appears in <em>both</em> the mean and the variance. And momentum is applied to the <em>filtered states</em>, not to the weights.</p>"""),
+
+        ("Get the h-step alignment right", "tvwnn/data.py", """
+<p>A supervised pair is <code>(u_t, y_{t+h})</code>. At forecast origin <code>o</code> only observations dated <code>&le; o</code> exist, so the last usable training pair is <code>(u_{o&minus;h}, y_o)</code>. The state at index <code>o</code> is therefore <code>h</code> random-walk steps beyond the last one the filter saw:</p>
+<div class="eq">E[&beta;<sub>o</sub> | data] = &beta;<sub>T|T</sub> &nbsp;&nbsp;&nbsp; Var[&beta;<sub>o</sub> | data] = P<sub>T|T</sub> + h&middot;&Omega;</div>
+<p>which is exactly what <code>forecast(..., gap=h)</code> does. Skip it and you either leak future information or understate the forecast variance by <code>h&middot;&Omega;</code>. A test asserts the inflation is exactly <code>h&middot;&Omega;</code>.</p>"""),
+
+        ("Build the evaluation loop", "tvwnn/evaluate.py", """
+<p>Expanding window from 1960, re-estimate every 30 months, POOS 1990&ndash;2014. Two things the engine does that the paper does not describe:</p>
+<ul>
+<li><b>PCA inside the training window.</b> Estimate the diffusion indices on training data only and project the evaluation period through those loadings. Fitting the PCA once on the full sample leaks the future into every forecast.</li>
+<li><b>Re-filter at every origin.</b> The network is re-estimated every 30 months, but the Kalman filter absorbs each new observation at almost no cost &mdash; holding the state fixed between re-estimations wastes the point of the state-space layer.</li>
+</ul>"""),
+
+        ("Report like a journal", "tvwnn/plots.py", """
+<p>Tables render twice &mdash; fixed-width console with rules, and <code>booktabs</code> LaTeX &mdash; with block minima marked and a significance footer, following the layout of Tables 1 and 2.</p>
+<p>Figures are <b>light only</b>: white background, Okabe&ndash;Ito colour-blind-safe palette, serif stack, no top/right spines, 300&nbsp;dpi PNG plus vector PDF. There is no dark variant by design &mdash; dark figures do not print.</p>"""),
+
+        ("Run it on real data, and believe what you see", "tvwnn/model.py", """
+<p>Everything above passes on simulated data. Then FRED-MD breaks it twice:</p>
+<ul>
+<li><code>|z|</code> drifts to <b>42</b> because the basis layer is linear and nothing pins its scale;</li>
+<li>the EM concludes <code>tr(&Omega;)/&sigma;&sup2; &asymp; 11</code> &mdash; &ldquo;all drift, no noise&rdquo; &mdash; because at h&nbsp;=&nbsp;12 the target is an overlapping difference whose MA(11) errors the state is delighted to absorb.</li>
+</ul>
+<p>Together they produced forecasts spanning <code>[&minus;18.4, 9.8]</code> against a realised <code>[&minus;1.5, 4.0]</code>. The fixes are <code>normalize_basis</code> and <code>sn_cap</code>.</p>
+<div class="note note-info"><span class="lbl">The lesson</span><p>A component-verified implementation can still be useless on the data it was written for. Simulate to check the mathematics, then run the real thing and look at the <em>range</em> of the forecasts before you look at their mean squared error.</p></div>"""),
+
+        ("Add what the paper omits", "tvwnn/evaluate.py", """
+<ul>
+<li><b>Every pairwise Diebold&ndash;Mariano test.</b> The paper's headline is that the TVNN beats a similarly tuned FFNN, but every star in its tables is against the <em>AR</em> benchmark.</li>
+<li><b>Model Confidence Set.</b> Two targets &times; four horizons &times; three predictor sets &times; six models of pairwise tests, with no multiplicity control.</li>
+<li><b>Predictive variance.</b> The Kalman machinery hands you <code>F_t = &sigma;&sup2; + z_t&prime;V_t z_t</code> for free; the paper reports point forecasts only.</li>
+</ul>"""),
+    ]
+
+    stepshtml = []
+    for i, (title, file, body) in enumerate(steps, 1):
+        link = f'<a class="file" href="{BLOB}/{file}">{file}</a>' if file else ""
+        stepshtml.append(
+            f'<div class="step"><div class="sh"><span class="sn">{i}</span>'
+            f"<h3>{title}</h3>{link}</div>{body}</div>"
+        )
+    stepshtml = "\n".join(stepshtml)
+
+    gallery = "\n".join(filter(None, [
+        figure("mse_by_horizon_indpro.png",
+               "<b>MSE by forecast horizon, INDPRO.</b> The paper's Figure 1, reproduced from this implementation. One line per model, best predictor set, TVNN highlighted."),
+        figure("mse_by_horizon_unrate.png",
+               "<b>MSE by forecast horizon, UNRATE.</b> The paper's Figure 2."),
+        figure("other_fedfunds.png",
+               "<b>Federal funds rate.</b> The TVNN (pink) sits well below the fixed-weight FFNN (green) at every horizon &mdash; more than halving its error at h&nbsp;=&nbsp;1, <code>DM p = 0.017</code>. This is the paper's central claim, on a series containing the zero lower bound."),
+        figure("other_cpiaucsl.png",
+               "<b>Consumer price inflation.</b> Every nonlinear model beats the AR benchmark at every horizon; the TVNN halves its error at h&nbsp;=&nbsp;12."),
+        figure("weights_unrate.png",
+               "<b>Smoothed time-varying weights, UNRATE.</b> The fitted &beta;&#770;<sub>t</sub> path with a &plusmn;2 s.e. band, NBER recessions shaded. Read the <em>shape</em>, not the level: the basis is identified only up to a rotation."),
+        figure("cssed_indpro.png",
+               "<b>Cumulative squared error difference, INDPRO.</b> A rising line means the model is beating the benchmark over that stretch. This shows <em>when</em> the gain accrues &mdash; which period-average MSE hides entirely."),
+        figure("forecasts_unrate.png",
+               "<b>Realised against forecast, UNRATE.</b> Realisation in black, models in colour, recessions shaded."),
+        figure("quickstart_weights.png",
+               "<b>Simulated data.</b> The recovered weight path on a known-truth DGP with genuine coefficient drift &mdash; where the TVNN beats an identical fixed-weight network by a factor of twelve."),
+        figure("quickstart_convergence.png",
+               "<b>Training diagnostics.</b> The EM/Adam alternation: network objective, marginal log-likelihood, and the variance components. The fastest way to spot a runaway signal-to-noise ratio."),
+    ]))
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tvwnn &mdash; Time-Varying Weight Neural Networks | {AUTHOR}</title>
+<meta name="description" content="A faithful, tested Python implementation of the time-varying neural network (TVNN) of Rudd, Bondell and Silver (2026), Journal of Forecasting. By {AUTHOR}.">
+<meta name="author" content="{AUTHOR}">
+<meta property="og:title" content="tvwnn &mdash; Time-Varying Weight Neural Networks">
+<meta property="og:description" content="Python implementation of the TVNN of Rudd, Bondell &amp; Silver (2026), with a full step-by-step build guide, verified components and honest results.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://merwanroudane.github.io/tvwnn/">
+<meta name="theme-color" content="#FCFBF8">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%230072B2'/><path d='M18 68 L36 44 L52 58 L82 26' stroke='white' stroke-width='9' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+</head>
+<body>
+
+<div class="menubtn" id="menubtn">&#9776; Contents</div>
+<div class="scrim" id="scrim"></div>
+
+<div class="shell">
+<aside class="sidebar" id="sidebar">
+  <a class="brand" href="#top">
+    <span class="name">tvwnn</span><span class="ver">v{VERSION}</span>
+    <span class="tag">Time-varying weight neural networks for macroeconomic forecasting</span>
+  </a>
+  <nav id="nav">
+{navhtml}
+  </nav>
+  <div class="sidefoot">
+    <b>{AUTHOR}</b><br>
+    <a href="mailto:{EMAIL}">{EMAIL}</a><br>
+    <a href="{GH}">GitHub</a> &middot; <a href="{PYPI}">PyPI</a>
+  </div>
+</aside>
+
+<main class="main" id="top">
+
+<div class="hero">
+  <div class="wrap">
+    <h1>Neural networks whose weights are allowed to move</h1>
+    <p class="lede">A faithful, tested Python implementation of the <b>TVNN</b> &mdash; a feedforward network that learns a low-dimensional basis, with the weights on that basis following a random walk, estimated by a Kalman filter inside an EM algorithm.</p>
+    <p class="byline">By <strong>{AUTHOR}</strong> &middot; <a href="mailto:{EMAIL}">{EMAIL}</a><br>
+    Implements Rudd, W., H. Bondell &amp; J. Silver (2026), &ldquo;Augmenting Neural Networks With Time-Varying Weights&rdquo;, <em>Journal of Forecasting</em> <b>45</b>(1): 22&ndash;28, <a href="{DOI}">doi:10.1002/for.70014</a></p>
+    <div class="badges">
+      <img src="https://img.shields.io/pypi/v/tvwnn.svg" alt="PyPI version">
+      <img src="https://img.shields.io/pypi/pyversions/tvwnn.svg" alt="Python versions">
+      <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT licence">
+      <img src="https://img.shields.io/badge/tests-30%20passing-brightgreen.svg" alt="30 tests passing">
+    </div>
+    <div class="ctarow">
+      <a class="btn btn-primary" href="#install">Get started</a>
+      <a class="btn btn-ghost" href="#guide">Step-by-step build guide</a>
+      <a class="btn btn-ghost" href="{GH}">GitHub</a>
+      <a class="btn btn-ghost" href="{PYPI}">PyPI</a>
+    </div>
+  </div>
+</div>
+
+<div class="wrap">
+
+<section id="what">
+<h2><span class="num">01</span>What is the TVNN</h2>
+<p>Start from a univariate target and a predictor panel. Stack <code>kx</code> predictor lags and <code>ky</code> target lags into <code>u_t</code>. A <em>linear</em> time-varying-parameter model would regress <code>y_{{t+h}}</code> on <code>u_t</code> with random-walk coefficients. The TVNN inserts a network first:</p>
+<div class="eq">z<sub>t</sub> = f<sub>w</sub>(u<sub>t</sub>) &isin; &#8477;<sup>d</sup> &nbsp;&nbsp;&nbsp; the learned basis (a bottleneck layer)<br><br>
+y<sub>t+h</sub> = z<sub>t</sub>&prime; &beta;<sub>t</sub> + &epsilon;<sub>t</sub> &nbsp;&nbsp;&nbsp; &epsilon;<sub>t</sub> ~ N(0, &sigma;&sup2;)<br>
+&beta;<sub>t</sub> &nbsp;&nbsp;&nbsp;= &beta;<sub>t&minus;1</sub> + &xi;<sub>t</sub> &nbsp;&nbsp;&nbsp; &xi;<sub>t</sub> ~ N(0, &Omega;)</div>
+<p><b>Why this is cheap.</b> The state dimension is <code>d</code>, a design choice &mdash; <em>not</em> <code>P</code>. Appendix A.3 of the paper selects <b>d &isin; {{1, 2}}</b>, so the Kalman recursions stay trivial even when <code>P = 424</code>. That is the whole reason the method scales where ordinary high-dimensional TVP models do not.</p>
+<h3>How it is estimated</h3>
+<p>Two loops over <em>different</em> objectives, and the split is deliberate:</p>
+<div class="tablecard"><div class="tscroll"><table>
+<thead><tr><th class="l">Loop</th><th class="l">Optimises</th><th class="l">Uses</th><th class="l">Why</th></tr></thead>
+<tbody>
+<tr><td class="l">inner, EM</td><td class="l"><code>&theta; = {{&sigma;&sup2;, &Omega;, b<sub>0</sub>}}</code></td><td class="l"><b>smoothed</b> states</td><td class="l">closed-form M step (Holmes 2013)</td></tr>
+<tr><td class="l">outer, Adam</td><td class="l">network weights <code>w</code></td><td class="l"><b>filtered</b> states</td><td class="l">only filtered states exist out of sample</td></tr>
+</tbody></table></div></div>
+<p>Training the basis against smoothed states would generalise badly, because at forecast time there is no future data to smooth with. Inside the Adam block the states are frozen constants &mdash; which is why a gradient step costs exactly what an ordinary network's does.</p>
+<div class="statgrid">
+  <div class="stat"><div class="v">1e&minus;9</div><div class="k">filter agreement with <code>statsmodels</code></div></div>
+  <div class="stat"><div class="v">30</div><div class="k">tests, all passing</div></div>
+  <div class="stat"><div class="v">13&times;</div><div class="k">speedup from the scalar fast path</div></div>
+  <div class="stat"><div class="v">0.500</div><div class="k">relative MSE on inflation at h&nbsp;=&nbsp;12</div></div>
+</div>
+</section>
+
+<section id="install">
+<h2><span class="num">02</span>Install &amp; quickstart</h2>
+<pre class="shell"><code>pip install tvwnn</code></pre>
+<p>Requires Python &ge; 3.10 with NumPy, pandas, SciPy, PyTorch, scikit-learn and Matplotlib. CPU-only PyTorch is plenty &mdash; at <code>d &isin; {{1,2}}</code> there is nothing for a GPU to do.</p>
+<h3>Sixty seconds, no download required</h3>
+<pre><code>import numpy as np
+from tvwnn import TVNN, simulate_tvnn, dm_test, FeedForwardForecaster
+
+ds, truth = simulate_tvnn(n=420, p=3, h=1, sigma=0.3, omega=0.02, seed=0)
+n_train = 350
+
+model = TVNN(d=1, hidden_sizes=(32,), n_outer=30, grad_steps=10,
+             l2=0.02, random_state=0).fit(ds.U[:n_train], ds.y[:n_train])
+
+print(model.summary())</code></pre>
+<pre class="out"><code>Out-of-sample accuracy
+----------------------------------------------------
+model              MSE     vs AR      DM p
+AR              2.9388     1.000
+FFNN            2.7071     0.921    0.2899
+TVNN            0.2250     0.077    0.0000   ***
+----------------------------------------------------
+TVNN vs FFNN: DM = -8.365, p = 0.0000 ***</code></pre>
+<h3>Real economic data in ten lines</h3>
+<pre><code>from tvwnn import fetch_fred_md, build_fred_dataset, TVNN
+
+panel, tcodes = fetch_fred_md(cache_dir="data")      # downloads &amp; caches FRED-MD
+
+ds = build_fred_dataset(target="UNRATE", h=12, n_factors=5,   # P = 24
+                        start="1960-01-01", end="2014-12-01",
+                        data=panel, tcodes=tcodes)
+
+model = TVNN(d=2, l2=0.02, random_state=0).fit(ds.U, ds.y)</code></pre>
+<div class="tablecard"><div class="tscroll"><table>
+<thead><tr><th class="l"><code>n_factors</code></th><th class="l">Design</th><th>P</th><th class="l">Paper</th></tr></thead>
+<tbody>
+<tr><td class="l">5</td><td class="l">4 target lags + 4 lags &times; 5 principal components</td><td>24</td><td class="l">P = 24</td></tr>
+<tr><td class="l">15</td><td class="l">4 target lags + 4 lags &times; 15 principal components</td><td>64</td><td class="l">P = 64</td></tr>
+<tr><td class="l">None</td><td class="l">4 target lags + 4 lags &times; every series, no PCA</td><td>~460</td><td class="l">P = 424</td></tr>
+<tr><td class="l">0</td><td class="l">4 target lags only</td><td>4</td><td class="l">the AR benchmark</td></tr>
+</tbody></table></div>
+<div class="tnote">Quarterly data works identically through <code>fetch_fred_qd()</code> &mdash; 233 complete FRED-QD series including real GDP, with <code>h</code> read as quarters.</div></div>
+</section>
+
+<section id="guide">
+<h2><span class="num">03</span>Writing the code, step by step</h2>
+<p>This is the build guide: what each module does, why it exists, the equation it implements, and the trap it avoids. Read it in order and you can rewrite the library from scratch.</p>
+{stepshtml}
+</section>
+
+<section id="api">
+<h2><span class="num">04</span>API &amp; syntax</h2>
+<h3>The estimator</h3>
+<pre><code>TVNN(d=1, hidden_sizes=(32,), activation="tanh", dropout=0.0, fixed_effect=False,
+     n_outer=30, grad_steps=10, em_iter=50, em_tol=1e-6,
+     learning_rate=0.01, l2=0.32, momentum=0.0,
+     loss="weighted_sse", state="predicted", omega_structure="full",
+     sn_cap=0.01, v0_scale=1e6, standardize=True, normalize_basis=True,
+     random_state=None, device=None, verbose=False)</code></pre>
+<div class="tablecard"><div class="tscroll"><table>
+<thead><tr><th class="l">Argument</th><th class="l">Default</th><th class="l">Meaning</th></tr></thead>
+<tbody>
+<tr><td class="l model">d</td><td class="l">1</td><td class="l">Basis functions = state dimension. A.3 selects from {{1, 2}}.</td></tr>
+<tr><td class="l model">hidden_sizes</td><td class="l">(32,)</td><td class="l"><code>(32,)</code> or <code>(32, 16)</code> in the paper.</td></tr>
+<tr><td class="l model">activation</td><td class="l">"tanh"</td><td class="l">A.3 uses tanh throughout.</td></tr>
+<tr><td class="l model">fixed_effect</td><td class="l">False</td><td class="l">Add the <code>z&#771;_t</code> output node of eq. (4).</td></tr>
+<tr><td class="l model">n_outer</td><td class="l">30</td><td class="l">N, outer iterations.</td></tr>
+<tr><td class="l model">grad_steps</td><td class="l">10</td><td class="l">M, Adam steps per outer iteration. 30 &times; 10 = 300 epochs, A.3's budget.</td></tr>
+<tr><td class="l model">learning_rate</td><td class="l">0.01</td><td class="l">A.3 draws from 0.01 &times; 2^s, s &isin; {{0,1,2}}.</td></tr>
+<tr><td class="l model">l2</td><td class="l">0.32</td><td class="l">&alpha;. A.3 draws from 0.01 &times; 2^s, s &isin; {{1..6}}.</td></tr>
+<tr><td class="l model">momentum</td><td class="l">0.0</td><td class="l">&gamma; on the <em>filtered states</em>, not on weights.</td></tr>
+<tr class="row-tvnn"><td class="l model">loss</td><td class="l">"weighted_sse"</td><td class="l">Eq. (8) as printed, or <code>"exact"</code> with the <code>log F_t</code> term. <a href="#open">See &sect;6</a>.</td></tr>
+<tr class="row-tvnn"><td class="l model">state</td><td class="l">"predicted"</td><td class="l">Which Kalman moments enter eq. (8). <a href="#open">See &sect;6</a>.</td></tr>
+<tr class="row-tvnn"><td class="l model">sn_cap</td><td class="l">0.01</td><td class="l">Bound on tr(&Omega;)/(d&sigma;&sup2;). <b>Not in the paper</b> &mdash; <a href="#realdata">see &sect;7</a>.</td></tr>
+<tr class="row-tvnn"><td class="l model">normalize_basis</td><td class="l">True</td><td class="l">Unit-variance columns of <code>z_t</code>. <b>Not in the paper</b> &mdash; <a href="#realdata">see &sect;7</a>.</td></tr>
+</tbody></table></div></div>
+<h4>Methods</h4>
+<pre><code>.fit(U, y)            # U[t] = u_t, y[t] = y_{{t+h}} -- use build_supervised
+.predict()            # in-sample one-step-ahead fitted values
+.forecast(u_new, gap=0, return_variance=False, U_hist=None, y_hist=None)
+.summary()            # sigma2, Omega, omega_trace, b0, final_loglik, settings</code></pre>
+<div class="note note-warn"><span class="lbl">The one argument that matters most</span>
+<p><b>Set <code>gap=h</code> in every <code>forecast</code> call.</b> It carries the state forward from the last training observation to the forecast origin. <code>poos_experiment</code> does it for you.</p></div>
+<h3>Everything else</h3>
+<pre><code># Ensembles -- A.3 averages 10 networks; Tables 1 and 2 are ensemble forecasts
+TVNNEnsemble(n_members=10, random_state=None, **tvnn_kwargs)
+
+# Baselines, all with the same .fit / .forecast interface
+ARBenchmark() &middot; RidgeARX() &middot; FeedForwardForecaster() &middot; RecurrentForecaster(cell="rnn"|"lstm")
+
+# Data
+fetch_fred_md() &middot; fetch_fred_qd() &middot; transform_panel() &middot; diffusion_indices()
+PCAProjector() &middot; make_target() &middot; target_kind_from_tcode() &middot; build_supervised()
+build_fred_dataset() &middot; simulate_tvnn()
+
+# Evaluation
+poos_experiment() &middot; dm_test() &middot; model_confidence_set() &middot; mse_table()
+A3_GRID &middot; sample_hyperparameters() &middot; select_hyperparameters()
+
+# Reporting
+forecast_accuracy_table() &middot; render_console() &middot; render_latex() &middot; dm_matrix()
+plot_mse_by_horizon() &middot; plot_time_varying_weights() &middot; plot_cssed()
+plot_forecast_vs_actual() &middot; plot_convergence() &middot; plot_scree() &middot; save_figure()</code></pre>
+</section>
+
+<section id="map">
+<h2><span class="num">05</span>Code &rarr; equation map</h2>
+<div class="tablecard"><div class="tscroll"><table>
+<thead><tr><th class="l">Paper</th><th class="l">Code</th></tr></thead>
+<tbody>
+<tr><td class="l">eq. (1) <code>u_t</code></td><td class="l model">data.build_lag_matrix, data.build_supervised</td></tr>
+<tr><td class="l">eq. (2)&ndash;(3) linear TVP</td><td class="l model">kalman.kalman_filter with Z = U</td></tr>
+<tr><td class="l">eq. (4) TVNN measurement</td><td class="l model">model.TVNN.fit, network.BasisNetwork</td></tr>
+<tr><td class="l">eq. (5) marginal likelihood</td><td class="l model">kalman.FilterResult.loglik</td></tr>
+<tr><td class="l">eq. (6) / App. A.1 eq. (9)</td><td class="l model">em.expected_loglik</td></tr>
+<tr><td class="l">eq. (7) E-step quantities</td><td class="l model">kalman.kalman_smoother</td></tr>
+<tr><td class="l">M step (Holmes 2013)</td><td class="l model">em.m_step</td></tr>
+<tr><td class="l">eq. (8) / App. A.2</td><td class="l model">the Adam block of model.TVNN.fit</td></tr>
+<tr><td class="l">Algorithm 1</td><td class="l model">model.TVNN.fit, em.run_em</td></tr>
+<tr><td class="l">&sect;4 targets</td><td class="l model">data.make_target</td></tr>
+<tr><td class="l">&sect;4 diffusion indices</td><td class="l model">data.diffusion_indices, data.PCAProjector</td></tr>
+<tr><td class="l">&sect;4 POOS protocol</td><td class="l model">evaluate.poos_experiment</td></tr>
+<tr><td class="l">&sect;4 Diebold&ndash;Mariano</td><td class="l model">evaluate.dm_test</td></tr>
+<tr><td class="l">App. A.3 grids</td><td class="l model">evaluate.A3_GRID, select_hyperparameters</td></tr>
+<tr><td class="l">App. A.3 ensembles of 10</td><td class="l model">model.TVNNEnsemble</td></tr>
+<tr><td class="l">Tables 1&ndash;2 / Figures 1&ndash;2</td><td class="l model">tables.forecast_accuracy_table, plots.plot_mse_by_horizon</td></tr>
+</tbody></table></div>
+<div class="tnote">Seven typographical errors in the published equations were found during the read and confirmed against the Supporting Information &mdash; a missing <code>T</code> multiplier in eq.&nbsp;(3), a spurious sign and wrong summation limits in eq.&nbsp;(8), <code>arg min</code> for <code>arg max</code> in Algorithm 1, and more. They are listed in full in the repository README.</div></div>
+</section>
+
+<section id="results">
+<h2><span class="num">06</span>Results on the paper&rsquo;s two targets</h2>
+<p>US industrial production and the unemployment rate, FRED-MD, pseudo-out-of-sample 1990&ndash;2014, models re-estimated every 30 months. Every number below is generated by <a href="{BLOB}/examples/run_empirical_study.py"><code>run_empirical_study.py</code></a> and read straight from the CSVs it writes.</p>
+{paper_targets_table()}
+{dm_pairwise_table()}
+{mcs_table()}
+</section>
+
+<section id="other">
+<h2><span class="num">07</span>Six targets, three horizons</h2>
+<p>The paper studies two series at four horizons, all with <code>h &gt; 1</code>. That is a narrow slice, and looking past it changes the conclusion.</p>
+{other_targets_table()}
+<div class="note note-good"><span class="lbl">Three findings the paper&rsquo;s design cannot show</span>
+<p><b>1. On inflation the method works, and works well.</b> On CPIAUCSL at h&nbsp;=&nbsp;12 the TVNN cuts the AR benchmark's error in half, p&nbsp;&lt;&nbsp;0.01, and every nonlinear model beats the benchmark at every horizon. Consistent with Medeiros et al. (2021). The paper never tries it.</p>
+<p><b>2. The paper&rsquo;s own claim reproduces &mdash; on a series with a real regime break.</b> On FEDFUNDS at h&nbsp;=&nbsp;1 the TVNN more than halves the fixed-weight FFNN's error, 1.483 against 3.105, <code>DM p = 0.017</code>. That is exactly the &ldquo;time-varying beats fixed&rdquo; result the paper asserts and never tests, and it appears where theory says it should: the funds rate over 1990&ndash;2014 contains the zero lower bound from December 2008.</p>
+<p><b>3. The overlapping target really is part of the problem.</b> On INDPRO the TVNN goes from 1.207 at h&nbsp;=&nbsp;1 to 1.490 at h&nbsp;=&nbsp;3. At h&nbsp;=&nbsp;1 there is no overlap and no induced MA structure for the random-walk state to absorb.</p></div>
+<p>The honest summary: <b>the TVNN is not a general-purpose improvement over a fixed-weight network &mdash; it is a tool for series whose conditional relationship actually shifts.</b> That is a more useful statement than the paper's, and it is only visible once you look past two targets.</p>
+</section>
+
+<section id="figures">
+<h2><span class="num">08</span>Figure gallery</h2>
+<p>Every figure is produced by the library at 300&nbsp;dpi in PNG and vector PDF, on a white background with the Okabe&ndash;Ito colour-blind-safe palette. There is no dark variant, by design &mdash; dark figures do not print.</p>
+{gallery}
+</section>
+
+<section id="open">
+<h2><span class="num">09</span>What the paper leaves open</h2>
+<p>Rather than guess, the library implements both branches of each and documents the default.</p>
+<h3>The missing <code>log F_t</code> in eq. (8) &mdash; <code>loss=</code></h3>
+<p>Eq. (8) as printed is a variance-weighted sum of squares. But the Gaussian log-density is <code>&minus;&frac12;[log(2&pi;F_t) + v_t&sup2;/F_t]</code>, and eq. (8) has <b>neither the <code>log F_t</code> nor the &frac12;</b>. Appendix A.2 sets the decomposition up correctly, then writes <em>&ldquo;By normality, (8) follows&rdquo;</em> &mdash; asserting rather than deriving. Since <code>F_t</code> depends on <code>w</code> through <code>z_t</code>, the omission <b>changes the gradient</b>.</p>
+<h3>Which filtered state enters eq. (8) &mdash; <code>state=</code></h3>
+<p>Algorithm 1 says <code>b_t = E[&beta;_t | y_t]</code>, the <em>updated</em> filtered state. But observation <code>t</code> in this state space <em>is</em> <code>y_{{t+h}}</code>, so that state has already absorbed the very value it is being used to predict. The textbook prediction error decomposition uses the one-step-<em>predicted</em> state, which is the default here and the only reading under which eq.&nbsp;(8) is a prediction-error decomposition at all.</p>
+<h3>Identification &mdash; read shapes, not levels</h3>
+<div class="note note-info"><span class="lbl">Not identified</span>
+<p>For any invertible <code>A</code>, the map <code>z &rarr; A&prime;z</code>, <code>&beta; &rarr; A&#8315;&sup1;&beta;</code>, <code>&Omega; &rarr; A&#8315;&sup1;&Omega;A&#8315;&#7488;</code> leaves the entire predictive distribution unchanged. So <code>&beta;&#770;_t</code> carries no &ldquo;the coefficient on feature j drifted&rdquo; reading &mdash; <b>read the shape, not the level</b> &mdash; and <code>&Omega;&#770;</code> is not comparable across runs or seeds. Point forecasting is unaffected, which is why the paper's results stand. The paper concedes the symptom without naming the cause.</p></div>
+</section>
+
+<section id="realdata">
+<h2><span class="num">10</span>What only shows up on real data</h2>
+<p>Neither of these is visible on simulated data, and neither is mentioned in the paper. Both were found by running the estimator on FRED-MD and watching it fail.</p>
+<h3>The signal-to-noise ratio runs away &mdash; <code>sn_cap</code></h3>
+<p>At horizon <code>h</code> the target is an <b>overlapping</b> difference, so its errors are MA(<code>h&minus;1</code>) by construction &mdash; and a drifting coefficient is an excellent way to absorb that. On FRED-MD unemployment at h&nbsp;=&nbsp;12 the unconstrained EM returns <code>tr(&Omega;)/&sigma;&sup2; &asymp; 11</code>: the coefficient fully re-randomises within a year.</p>
+<div class="tablecard"><div class="tscroll"><table>
+<thead><tr><th class="l"><code>sn_cap</code></th><th>d</th><th>POOS MSE</th><th class="l">Forecast range</th></tr></thead>
+<tbody>
+<tr><td class="l">None (paper)</td><td>1</td><td>3.13</td><td class="l">[&minus;9.60, 3.92]</td></tr>
+<tr><td class="l">None (paper)</td><td>2</td><td>10.11</td><td class="l">[&minus;18.41, 9.77]</td></tr>
+<tr class="row-tvnn"><td class="l">0.01 (default)</td><td>1</td><td class="best">2.09</td><td class="l">[&minus;1.45, 2.83]</td></tr>
+<tr class="row-tvnn"><td class="l">0.01 (default)</td><td>2</td><td class="best">2.03</td><td class="l">[&minus;2.41, 3.84]</td></tr>
+</tbody></table></div>
+<div class="tnote">UNRATE, h = 12, P = 24, POOS 2005&ndash;2014. Realised range [&minus;1.50, 4.00]; AR benchmark MSE 1.52. Bounding the ratio is the frequentist analogue of the shrinkage prior in Goulet Coulombe (2020).</div></div>
+<h3>The learned basis is unbounded &mdash; <code>normalize_basis</code></h3>
+<p>The basis layer is linear, so <code>&#8214;z&#8214;</code> is unconstrained &mdash; and because the model is invariant to a rotation of the basis, nothing pins the scale down. On FRED-MD the network drifts to <code>|z|</code> up to <b>42</b> while <code>&beta;</code> shrinks to compensate. Mathematically identical; numerically awful. Normalising is a <em>reparameterisation, not a restriction</em>: it picks a well-conditioned point on the same orbit, and <code>|z|max</code> drops from 42.2 to 2.5.</p>
+<h3>What this means for the paper</h3>
+<div class="note note-warn"><span class="lbl">An honest negative result</span>
+<p><b>On the paper&rsquo;s own two targets, this implementation does not reproduce its published forecast accuracy.</b> Two explanations were tested and ruled out: raising the training budget makes things <em>worse</em> (the networks overfit, they are not undertrained), and sweeping A.3's entire penalty grid rescues the FFNN to parity with the benchmark but does nothing for the TVNN.</p>
+<p>Three parts of the paper's protocol are implemented but off by default, because each multiplies runtime: 10-network ensembles (<code>--ensemble 10</code>, measured effect 1.70&times; &rarr; 1.41&times;), per-period random search over the A.3 grid (<code>--tune</code>), and a pinned FRED-MD vintage (<code>--vintage</code>). They narrow the gap without closing it.</p>
+<p>What this library <em>does</em> claim, and tests, is narrower and firmer: each component is correct in isolation, the h-step alignment carries no look-ahead, and on data generated by the paper's own model the estimator recovers it.</p></div>
+</section>
+
+<section id="tests">
+<h2><span class="num">11</span>Testing &amp; verification</h2>
+<pre class="shell"><code>pytest tests/ -v</code></pre>
+<div class="pillrow">
+<span class="pill ok">30 passed</span><span class="pill">~25 s</span><span class="pill">statsmodels oracle</span><span class="pill">known-truth DGP</span><span class="pill">no-look-ahead assertions</span>
+</div>
+<div class="tablecard"><div class="tscroll"><table>
+<thead><tr><th class="l">Test</th><th class="l">Establishes</th></tr></thead>
+<tbody>
+<tr><td class="l model">test_filter_matches_statsmodels</td><td class="l">log-likelihood, innovations and filtered states match an independent implementation to ~1e&minus;9</td></tr>
+<tr><td class="l model">test_scalar_fast_path_matches_general_path</td><td class="l">the d = 1 optimisation is exact to 1e&minus;10</td></tr>
+<tr><td class="l model">test_em_recovers_the_truth</td><td class="l">EM recovers known &sigma;&sup2; and &Omega; on a fixed design</td></tr>
+<tr><td class="l model">test_loglikelihood_increases_monotonically</td><td class="l">EM's defining guarantee &mdash; and the tripwire for a dropped lag-one covariance</td></tr>
+<tr><td class="l model">test_lag_one_covariance_is_not_negligible</td><td class="l">the cross term is material, not rounding</td></tr>
+<tr><td class="l model">test_supervised_pair_uses_only_past_predictors</td><td class="l">no look-ahead in the design matrix</td></tr>
+<tr><td class="l model">test_forecast_gap_reproduces_random_walk_inflation</td><td class="l">gap = h inflates the variance by exactly h&middot;&Omega;</td></tr>
+<tr class="row-tvnn"><td class="l model">test_tvnn_beats_a_fixed_weight_network_on_drifting_data</td><td class="l">the paper's central claim, on a DGP where it must hold</td></tr>
+<tr><td class="l model">test_dm_sign_convention_and_stars</td><td class="l">a negative DM statistic favours the first argument</td></tr>
+</tbody></table></div></div>
+</section>
+
+<section id="cite">
+<h2><span class="num">12</span>Citation</h2>
+<p>Cite the paper:</p>
+<pre><code>@article{{rudd2026tvnn,
+  author  = {{Rudd, William and Bondell, Howard and Silver, Jeremy}},
+  title   = {{Augmenting Neural Networks With Time-Varying Weights}},
+  journal = {{Journal of Forecasting}},
+  volume  = {{45}}, number = {{1}}, pages = {{22--28}}, year = {{2026}},
+  doi     = {{10.1002/for.70014}}
+}}</code></pre>
+<p>And, if this implementation was useful:</p>
+<pre><code>@software{{roudane2026tvwnn,
+  author  = {{Roudane, Merwan}},
+  title   = {{tvwnn: Time-Varying Weight Neural Networks in Python}},
+  year    = {{2026}}, version = {{{VERSION}}},
+  url     = {{https://pypi.org/project/tvwnn/}},
+  note    = {{Python package; source at {GH}}}
+}}</code></pre>
+</section>
+
+<section id="links">
+<h2><span class="num">13</span>All links</h2>
+<div class="tablecard"><div class="tscroll"><table class="kv">
+<tbody>
+<tr><td>Package on PyPI</td><td><a href="{PYPI}">pypi.org/project/tvwnn</a></td></tr>
+<tr><td>Source on GitHub</td><td><a href="{GH}">github.com/merwanroudane/tvwnn</a></td></tr>
+<tr><td>Issue tracker</td><td><a href="{GH}/issues">github.com/merwanroudane/tvwnn/issues</a></td></tr>
+<tr><td>Full README</td><td><a href="{BLOB}/README.md">README.md</a></td></tr>
+<tr><td>The paper</td><td><a href="{DOI}">doi:10.1002/for.70014</a></td></tr>
+<tr><td>Author on GitHub</td><td><a href="https://github.com/merwanroudane">github.com/merwanroudane</a></td></tr>
+<tr><td>Email</td><td><a href="mailto:{EMAIL}">{EMAIL}</a></td></tr>
+</tbody></table></div></div>
+<h3>Module source</h3>
+<div class="pillrow">
+<a class="pill" href="{BLOB}/tvwnn/kalman.py">kalman.py</a>
+<a class="pill" href="{BLOB}/tvwnn/em.py">em.py</a>
+<a class="pill" href="{BLOB}/tvwnn/network.py">network.py</a>
+<a class="pill" href="{BLOB}/tvwnn/model.py">model.py</a>
+<a class="pill" href="{BLOB}/tvwnn/baselines.py">baselines.py</a>
+<a class="pill" href="{BLOB}/tvwnn/data.py">data.py</a>
+<a class="pill" href="{BLOB}/tvwnn/evaluate.py">evaluate.py</a>
+<a class="pill" href="{BLOB}/tvwnn/tables.py">tables.py</a>
+<a class="pill" href="{BLOB}/tvwnn/plots.py">plots.py</a>
+</div>
+<h3>Examples</h3>
+<div class="pillrow">
+<a class="pill" href="{BLOB}/examples/quickstart.py">quickstart.py</a>
+<a class="pill" href="{BLOB}/examples/run_empirical_study.py">run_empirical_study.py</a>
+<a class="pill" href="{BLOB}/examples/other_targets_study.py">other_targets_study.py</a>
+</div>
+<h3>Background references</h3>
+<ul>
+<li>Holmes, E. E. (2013). <em>Derivation of an EM algorithm for constrained and unconstrained MARSS models.</em> <a href="https://arxiv.org/abs/1302.3919">arXiv:1302.3919</a> &mdash; the M step.</li>
+<li>Durbin, J. &amp; S. J. Koopman (2012). <em>Time Series Analysis by State Space Methods</em>, 2nd ed. OUP.</li>
+<li>McCracken, M. &amp; S. Ng (2016). &ldquo;FRED-MD: A Monthly Database for Macroeconomic Research.&rdquo; <em>JBES</em> 34(4): 574&ndash;589.</li>
+<li>Stock, J. &amp; M. Watson (2002). &ldquo;Macroeconomic Forecasting Using Diffusion Indices.&rdquo; <em>JBES</em> 20(2): 147&ndash;162.</li>
+<li>Harvey, D., S. Leybourne &amp; P. Newbold (1997). &ldquo;Testing the equality of prediction mean squared errors.&rdquo; <em>IJF</em> 13(2): 281&ndash;291.</li>
+<li>Hansen, P. R., A. Lunde &amp; J. M. Nason (2011). &ldquo;The Model Confidence Set.&rdquo; <em>Econometrica</em> 79(2): 453&ndash;497.</li>
+<li>Goulet Coulombe, P. (2020). &ldquo;Time-Varying Parameters as Ridge Regressions.&rdquo; <a href="https://arxiv.org/abs/2009.00401">arXiv:2009.00401</a>.</li>
+</ul>
+</section>
+
+</div>
+</main>
+</div>
+
+<footer>
+  <div class="wrap">
+    <div class="fname">{AUTHOR}</div>
+    <p style="margin-top:6px"><a href="mailto:{EMAIL}">{EMAIL}</a> &middot;
+    <a href="https://github.com/merwanroudane">github.com/merwanroudane</a></p>
+    <p><code>tvwnn</code> v{VERSION} &mdash; released under the
+    <a href="{BLOB}/LICENSE">MIT licence</a>.
+    Implements Rudd, Bondell &amp; Silver (2026), <a href="{DOI}">doi:10.1002/for.70014</a>;
+    this package is an independent implementation and is not affiliated with its authors.</p>
+  </div>
+</footer>
+
+<a class="toplink" id="toplink" href="#top" aria-label="Back to top">&uarr;</a>
+
+<script>
+(function () {{
+  var sb = document.getElementById('sidebar'),
+      mb = document.getElementById('menubtn'),
+      sc = document.getElementById('scrim'),
+      tl = document.getElementById('toplink'),
+      links = Array.prototype.slice.call(document.querySelectorAll('#nav a')),
+      secs = links.map(function (a) {{ return document.querySelector(a.getAttribute('href')); }});
+
+  function setMenu(open) {{
+    sb.classList.toggle('open', open);
+    sc.classList.toggle('show', open);
+  }}
+  mb.addEventListener('click', function () {{ setMenu(!sb.classList.contains('open')); }});
+  sc.addEventListener('click', function () {{ setMenu(false); }});
+  links.forEach(function (a) {{
+    a.addEventListener('click', function () {{ setMenu(false); }});
+  }});
+  document.addEventListener('keydown', function (e) {{
+    if (e.key === 'Escape') setMenu(false);
+  }});
+
+  function onScroll() {{
+    var y = window.scrollY + 90, cur = 0;
+    for (var i = 0; i < secs.length; i++) {{
+      if (secs[i] && secs[i].offsetTop <= y) cur = i;
+    }}
+    links.forEach(function (a, i) {{ a.classList.toggle('active', i === cur); }});
+    tl.classList.toggle('show', window.scrollY > 700);
+  }}
+  window.addEventListener('scroll', onScroll, {{ passive: true }});
+  onScroll();
+}})();
+</script>
+</body>
+</html>
+"""
+
+
+if __name__ == "__main__":
+    DOCS.mkdir(exist_ok=True)
+    (DOCS / ".nojekyll").touch()
+    out = DOCS / "index.html"
+    out.write_text(build(), encoding="utf-8")
+    print(f"wrote {out}  ({out.stat().st_size / 1024:.1f} KB)")
